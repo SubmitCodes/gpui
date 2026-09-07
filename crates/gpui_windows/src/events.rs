@@ -923,6 +923,19 @@ impl WindowsWindowInner {
                 .context("unable to set window position after dpi has changed")
                 .log_err();
             }
+
+            // Windows normally emits WM_SIZE synchronously from SetWindowPos, but it can defer
+            // that message while the user is moving the window between displays. Keep GPUI's
+            // logical size and scale factor in sync immediately so painting and hit testing do
+            // not use different coordinate spaces for the rest of the move loop.
+            let mut client_rect = RECT::default();
+            if unsafe { GetClientRect(handle, &mut client_rect) }.is_ok() {
+                let device_size = size(
+                    DevicePixels(client_rect.right - client_rect.left),
+                    DevicePixels(client_rect.bottom - client_rect.top),
+                );
+                self.handle_size_change(device_size, new_scale_factor, true);
+            }
         }
 
         Some(0)
