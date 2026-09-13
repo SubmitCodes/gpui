@@ -670,6 +670,18 @@ impl WaylandWindowState {
             WindowDecorations::Client => self.client_inset.unwrap_or(px(0.0)),
         }
     }
+
+    /// Shrinks a toplevel by one logical pixel on any axis whose device size ends in half a
+    /// pixel. An edge on a pixel centre is where a compositor rounds the surface and the blur
+    /// behind it differently, leaving a strip of backdrop along the edge under fractional scaling.
+    /// Doesn't affect fullscreen.
+    fn settled(&self, size: Size<Pixels>, scale: f32) -> Size<Pixels> {
+        let toplevel = matches!(self.surface_state, WaylandSurfaceState::Xdg(_));
+        if !toplevel || self.fullscreen || self.maximized {
+            return size;
+        }
+        size.map(|value| off_half_pixel(value, scale))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1451,17 +1463,13 @@ impl WaylandWindowStatePtr {
     pub fn set_size_and_scale(&self, size: Option<Size<Pixels>>, scale: Option<f32>) {
         let (size, scale) = {
             let mut state = self.state.borrow_mut();
-            if size.is_none_or(|size| size == state.bounds.size)
-                && scale.is_none_or(|scale| scale == state.scale)
-            {
+            let scale = scale.unwrap_or(state.scale);
+            let size = state.settled(size.unwrap_or(state.bounds.size), scale);
+            if size == state.bounds.size && scale == state.scale {
                 return;
             }
-            if let Some(size) = size {
-                state.bounds.size = size;
-            }
-            if let Some(scale) = scale {
-                state.scale = scale;
-            }
+            state.bounds.size = size;
+            state.scale = scale;
             let device_bounds = state.bounds.to_device_pixels(state.scale);
             state.renderer.update_drawable_size(device_bounds.size);
             (state.bounds.size, state.scale)
@@ -1679,6 +1687,7 @@ impl PlatformWindow for WaylandWindow {
         // Keep window geometry consistent with configure handling. On Wayland, window geometry is
         // surface-local: resizing should not attempt to translate the window; the compositor
         // controls placement. We also account for client-side decoration insets and tiling.
+        let size = state.settled(size, state.scale);
         let window_geometry = inset_by_tiling(
             Bounds {
                 origin: Point::default(),
@@ -2274,6 +2283,16 @@ fn compute_outer_size(
 
         new_size
     })
+}
+
+/// Drops one logical pixel from a length whose device length ends in exactly half a pixel.
+fn off_half_pixel(value: Pixels, scale: f32) -> Pixels {
+    let device = f32::from(value) * scale;
+    let centred = (device.fract() - 0.5).abs() < 1e-3;
+    match centred && value > px(1.0) {
+        true => value - px(1.0),
+        false => value,
+    }
 }
 
 fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) -> Bounds<Pixels> {
