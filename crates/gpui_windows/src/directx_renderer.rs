@@ -180,6 +180,7 @@ struct DirectXRenderPipelines {
     underline_pipeline: PipelineState<Underline>,
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
+    subpixel_sprites_layered: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
 }
 
@@ -903,7 +904,8 @@ impl DirectXRenderer {
                     self.draw_monochrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::SubpixelSprites { texture_id, range } => {
-                    self.draw_subpixel_sprites(texture_id, range.start, range.len())
+                    let into_layer = !stack.is_empty();
+                    self.draw_subpixel_sprites(texture_id, range.start, range.len(), into_layer)
                 }
                 PrimitiveBatch::PolychromeSprites { texture_id, range } => {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
@@ -1046,6 +1048,15 @@ impl DirectXRenderer {
                 &devices.device_context,
                 &scene.subpixel_sprites,
             )?;
+            // Most frames have no open opacity/blur layer at all, so skip this pipeline's
+            // upload of the same instances unless one could actually draw from it.
+            if !scene.effects.is_empty() {
+                self.pipelines.subpixel_sprites_layered.update_buffer(
+                    &devices.device,
+                    &devices.device_context,
+                    &scene.subpixel_sprites,
+                )?;
+            }
         }
 
         if !scene.polychrome_sprites.is_empty() {
@@ -1243,19 +1254,27 @@ impl DirectXRenderer {
         texture_id: AtlasTextureId,
         start: usize,
         len: usize,
+        into_layer: bool,
     ) -> Result<()> {
         if len == 0 {
             return Ok(());
         }
         let devices = self.devices.as_ref().context("devices missing")?;
         let texture_view = self.atlas.get_texture_view(texture_id);
-        self.pipelines.subpixel_sprites.draw_range_with_texture(
+        let batch_params = self
+            .globals
+            .batch_params_buffer
+            .as_ref()
+            .context("batch params buffer missing")?;
+        // See `subpixel_sprite_layered_fragment` for why a layer needs a different blend.
+        let pipeline = match into_layer {
+            true => &mut self.pipelines.subpixel_sprites_layered,
+            false => &mut self.pipelines.subpixel_sprites,
+        };
+        pipeline.draw_range_with_texture(
             &devices.device_context,
             &texture_view,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
+            batch_params,
             slice::from_ref(&self.globals.sampler),
             start as u32,
             len as u32,
@@ -1501,6 +1520,15 @@ impl DirectXRenderPipelines {
             512,
             create_blend_state_for_subpixel_rendering(device)?,
         )?;
+        // Same glyphs, for when they land in an offscreen layer instead of the frame;
+        // see `subpixel_sprite_layered_fragment`.
+        let subpixel_sprites_layered = PipelineState::new(
+            device,
+            "subpixel_sprite_layered_pipeline",
+            ShaderModule::SubpixelSpriteLayered,
+            512,
+            create_blend_state_premultiplied(device)?,
+        )?;
         let poly_sprites = PipelineState::new(
             device,
             "polychrome_sprite_pipeline",
@@ -1522,6 +1550,7 @@ impl DirectXRenderPipelines {
             underline_pipeline,
             mono_sprites,
             subpixel_sprites,
+            subpixel_sprites_layered,
             poly_sprites,
         })
     }
@@ -2309,6 +2338,7 @@ pub(crate) mod shader_resources {
         PathSprite,
         MonochromeSprite,
         SubpixelSprite,
+        SubpixelSpriteLayered,
         PolychromeSprite,
         EmojiRasterization,
     }
@@ -2395,6 +2425,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::SubpixelSprite => match target {
                     ShaderTarget::Vertex => SUBPIXEL_SPRITE_VERTEX_BYTES,
                     ShaderTarget::Fragment => SUBPIXEL_SPRITE_FRAGMENT_BYTES,
+                },
+                ShaderModule::SubpixelSpriteLayered => match target {
+                    ShaderTarget::Vertex => SUBPIXEL_SPRITE_LAYERED_VERTEX_BYTES,
+                    ShaderTarget::Fragment => SUBPIXEL_SPRITE_LAYERED_FRAGMENT_BYTES,
                 },
                 ShaderModule::PolychromeSprite => match target {
                     ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
@@ -2493,6 +2527,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::PathSprite => "path_sprite",
                 ShaderModule::MonochromeSprite => "monochrome_sprite",
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
+                ShaderModule::SubpixelSpriteLayered => "subpixel_sprite_layered",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
                 ShaderModule::EmojiRasterization => "emoji_rasterization",
             }
