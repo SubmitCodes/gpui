@@ -889,9 +889,17 @@ impl MetalRenderer {
                     let Some(held) = held.filter(|_| stack.is_empty()) else {
                         continue;
                     };
-                    let sigma = scene.backdrops[range.clone()]
+                    let backdrops = &scene.backdrops[range.clone()];
+                    let sigma = backdrops
                         .iter()
                         .fold(0., |widest: f32, backdrop| widest.max(backdrop.blur));
+                    // A backdrop samples the blur only within its own bounds, so the passes
+                    // are scissored to the union of the batch's, grown by the kernel inside
+                    // `blur_source`, rather than run over the whole frame.
+                    let clip = backdrops
+                        .iter()
+                        .map(|backdrop| backdrop.bounds)
+                        .reduce(|union, bounds| union.union(&bounds));
 
                     command_encoder.end_encoding();
                     let blurred = self.blur_source(
@@ -899,7 +907,7 @@ impl MetalRenderer {
                         command_buffer,
                         &held.frame,
                         sigma,
-                        None,
+                        clip,
                         viewport_size,
                     );
                     command_encoder = new_command_encoder_for_texture(
