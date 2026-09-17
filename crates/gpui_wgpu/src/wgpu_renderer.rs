@@ -2112,9 +2112,18 @@ impl WgpuRenderer {
                         let Some(views) = views.as_ref().filter(|_| stack.is_empty()) else {
                             continue;
                         };
-                        let sigma = scene.backdrops[range.clone()]
+                        let backdrops = &scene.backdrops[range.clone()];
+                        let sigma = backdrops
                             .iter()
                             .fold(0., |widest: f32, backdrop| widest.max(backdrop.blur));
+                        // A backdrop samples the blur only within its own bounds, so the
+                        // passes are scissored to the union of the batch's, grown by the
+                        // kernel inside `blur_source`. Blurring the whole frame for a strip
+                        // of it made every frame with a backdrop on it cost the full screen.
+                        let clip = backdrops
+                            .iter()
+                            .map(|backdrop| backdrop.bounds)
+                            .reduce(|union, bounds| union.union(&bounds));
 
                         drop(pass);
                         let frame = views.frame.clone();
@@ -2123,7 +2132,7 @@ impl WgpuRenderer {
                             views,
                             &frame,
                             sigma,
-                            None,
+                            clip,
                             &mut instance_offset,
                         )?;
                         pass = Self::resume_pass(

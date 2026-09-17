@@ -575,18 +575,22 @@ impl DirectXRenderer {
         Ok(held)
     }
 
+    /// Blurs the frame within `clip`, the union of the batch's backdrops grown by the kernel
+    /// inside `blur_source`, and draws the batch over it. A backdrop samples only within its
+    /// own bounds, so nothing outside the union is worth blurring.
     fn draw_backdrops(
         &mut self,
         first: usize,
         count: usize,
         sigma: f32,
+        clip: Option<Bounds<ScaledPixels>>,
         mirrored: bool,
     ) -> Result<()> {
         let frame = {
             let resources = self.resources.as_ref().context("resources missing")?;
             resources.filters.frame.source.clone()
         };
-        let blurred = self.blur_source(frame, sigma, None)?;
+        let blurred = self.blur_source(frame, sigma, clip)?;
         self.restore_frame(mirrored)?;
 
         let (_, device_context, sampler, batch_params) = self.pipeline_handles()?;
@@ -906,10 +910,15 @@ impl DirectXRenderer {
                 }
                 PrimitiveBatch::Backdrops(range) => {
                     if stack.is_empty() {
-                        let sigma = scene.backdrops[range.clone()]
+                        let backdrops = &scene.backdrops[range.clone()];
+                        let sigma = backdrops
                             .iter()
                             .fold(0., |widest: f32, backdrop| widest.max(backdrop.blur));
-                        self.draw_backdrops(range.start, range.len(), sigma, mirrored)?;
+                        let clip = backdrops
+                            .iter()
+                            .map(|backdrop| backdrop.bounds)
+                            .reduce(|union, bounds| union.union(&bounds));
+                        self.draw_backdrops(range.start, range.len(), sigma, clip, mirrored)?;
                     }
                     Ok(())
                 }
