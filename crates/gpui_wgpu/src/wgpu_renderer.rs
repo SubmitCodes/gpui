@@ -1927,8 +1927,6 @@ impl WgpuRenderer {
             // filter share one target, so a list of separately blurred rows costs one pass, not one
             // per row.
             let mut spans: Vec<Bounds<ScaledPixels>> = Vec::new();
-            let mut cleared = [false; LAYER_DEPTH];
-            let mut transformed_target = [false; LAYER_DEPTH];
             for batch in scene.batches() {
                 let wanted = views
                     .as_ref()
@@ -2012,14 +2010,7 @@ impl WgpuRenderer {
                         .as_ref()
                         .expect("a filtered layer implies its targets");
                     let depth = stack.len();
-                    let should_clear =
-                        !cleared[depth] || layer.filter.transforms() || transformed_target[depth];
-                    let load = match should_clear {
-                        true => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        false => wgpu::LoadOp::Load,
-                    };
-                    cleared[depth] = true;
-                    transformed_target[depth] = layer.filter.transforms();
+                    let load = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
 
                     drop(pass);
                     pass = Self::resume_pass(&mut encoder, "layer_pass", &held.layers[depth], load);
@@ -2126,7 +2117,6 @@ impl WgpuRenderer {
                             .iter()
                             .map(|backdrop| backdrop.bounds)
                             .reduce(|union, bounds| union.union(&bounds));
-
                         drop(pass);
                         let frame = views.frame.clone();
                         let blurred = self.blur_source(
