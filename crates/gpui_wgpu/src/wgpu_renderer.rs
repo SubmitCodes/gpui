@@ -1922,6 +1922,11 @@ impl WgpuRenderer {
                 ..Default::default()
             });
 
+            // Where the pass in hand is drawing: the frame, or the layer being filled when one
+            // is open. Anything that has to break the pass and resume it has to resume it here,
+            // or its primitives land in the window while the rest of the frame is still being
+            // assembled somewhere else.
+            let mut target = main_view;
             let mut stack: Vec<usize> = Vec::new();
             // What each open layer will be composited through: neighbours that ask for the same
             // filter share one target, so a list of separately blurred rows costs one pass, not one
@@ -1986,10 +1991,11 @@ impl WgpuRenderer {
                         &mut instance_offset,
                         &[mask_params(layer, clip)],
                     )?;
+                    target = onto;
                     pass = Self::resume_pass(
                         &mut encoder,
                         "layer_composite_pass",
-                        onto,
+                        target,
                         wgpu::LoadOp::Load,
                     );
                     self.composite_layer(
@@ -2013,7 +2019,8 @@ impl WgpuRenderer {
                     let load = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
 
                     drop(pass);
-                    pass = Self::resume_pass(&mut encoder, "layer_pass", &held.layers[depth], load);
+                    target = &held.layers[depth];
+                    pass = Self::resume_pass(&mut encoder, "layer_pass", target, load);
                     stack.push(*index);
                     spans.push(layer.destination_clip());
                 }
@@ -2044,20 +2051,12 @@ impl WgpuRenderer {
                             &mut instance_offset,
                         )?;
 
-                        pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("main_pass_continued"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: frame_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                                depth_slice: None,
-                            })],
-                            depth_stencil_attachment: None,
-                            ..Default::default()
-                        });
+                        pass = Self::resume_pass(
+                            &mut encoder,
+                            "main_pass_continued",
+                            target,
+                            wgpu::LoadOp::Load,
+                        );
 
                         if rasterized {
                             self.draw_paths_from_intermediate(
@@ -2130,7 +2129,7 @@ impl WgpuRenderer {
                         pass = Self::resume_pass(
                             &mut encoder,
                             "main_pass_continued",
-                            main_view,
+                            target,
                             wgpu::LoadOp::Load,
                         );
 
@@ -2176,10 +2175,11 @@ impl WgpuRenderer {
                     &mut instance_offset,
                     &[mask_params(layer, clip)],
                 )?;
+                target = onto;
                 pass = Self::resume_pass(
                     &mut encoder,
                     "layer_composite_pass",
-                    onto,
+                    target,
                     wgpu::LoadOp::Load,
                 );
                 self.composite_layer(
