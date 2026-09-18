@@ -487,9 +487,13 @@ impl DirectXRenderer {
             .unwrap_or(BLUR_STEPS.len() - 1);
         let shrink = BLUR_STEPS[step] as f32;
         // Each pass reads a kernel's width beyond what the next one needs, so the region grows
-        // from the composited clip outwards.
+        // from the composited clip outwards. Every one reaches a texel further still: the
+        // blurred texture is sampled at full resolution, so a fragment on the clip's own edge
+        // draws part of its colour from the texel outside it, which nothing has written.
         let region = |renderer: &Self, margin: f32, shrink: u32| match clip {
-            Some(clip) => renderer.scissor(clip.dilate(ScaledPixels(margin)), shrink),
+            Some(clip) => {
+                renderer.scissor(clip.dilate(ScaledPixels(margin + shrink as f32)), shrink)
+            }
             None => Ok(None),
         };
 

@@ -1357,10 +1357,12 @@ impl WgpuRenderer {
         let blur = self.resources().pipelines.blur.clone();
 
         // Each pass reads a kernel's width beyond what the next one needs, so the region grows
-        // from the composited clip outwards.
-        let reached = |clip: Bounds<ScaledPixels>, margin: f32| clip.dilate(ScaledPixels(margin));
+        // from the composited clip outwards. Every one reaches a texel further still: the
+        // blurred texture is sampled at full resolution, so a fragment on the clip's own edge
+        // draws part of its colour from the texel outside it, which nothing has written.
         let within = |clip: Option<Bounds<ScaledPixels>>, margin: f32, shrink: u32| {
-            clip.map(|clip| self.scissor(reached(clip, margin), shrink))
+            let reach = ScaledPixels(margin + shrink as f32);
+            clip.map(|clip| self.scissor(clip.dilate(reach), shrink))
         };
 
         let mut from = source;
