@@ -134,6 +134,9 @@ struct WgpuPipelines {
     underlines: wgpu::RenderPipeline,
     mono_sprites: wgpu::RenderPipeline,
     subpixel_sprites: Option<wgpu::RenderPipeline>,
+    /// The same glyphs for when they land in an offscreen layer rather than the frame; see
+    /// `fs_subpixel_sprite_layered`.
+    subpixel_sprites_layered: Option<wgpu::RenderPipeline>,
     poly_sprites: wgpu::RenderPipeline,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
@@ -1182,6 +1185,21 @@ impl WgpuRenderer {
             None
         };
 
+        let subpixel_sprites_layered = subpixel_shader_module.as_ref().map(|subpixel_module| {
+            create_pipeline(
+                "subpixel_sprites_layered",
+                "vs_subpixel_sprite",
+                "fs_subpixel_sprite_layered",
+                &layouts.globals,
+                &layouts.instances,
+                Some(&layouts.texture),
+                wgpu::PrimitiveTopology::TriangleStrip,
+                &[Some(color_target.clone())],
+                1,
+                subpixel_module,
+            )
+        });
+
         let poly_sprites = create_pipeline(
             "poly_sprites",
             "vs_poly_sprite",
@@ -1221,6 +1239,7 @@ impl WgpuRenderer {
             underlines,
             mono_sprites,
             subpixel_sprites,
+            subpixel_sprites_layered,
             poly_sprites,
             surfaces,
         }
@@ -2081,14 +2100,16 @@ impl WgpuRenderer {
                     ),
                     PrimitiveBatch::SubpixelSprites { texture_id, range } => {
                         let resources = self.resources();
+                        // See `fs_subpixel_sprite_layered` for why a layer needs a different
+                        // blend than the frame.
+                        let pipeline = match stack.is_empty() {
+                            true => resources.pipelines.subpixel_sprites.as_ref(),
+                            false => resources.pipelines.subpixel_sprites_layered.as_ref(),
+                        };
                         self.draw_sprites(
                             &instance_bindings.subpixel_sprites,
                             texture_id,
-                            resources
-                                .pipelines
-                                .subpixel_sprites
-                                .as_ref()
-                                .unwrap_or(&resources.pipelines.mono_sprites),
+                            pipeline.unwrap_or(&resources.pipelines.mono_sprites),
                             instance_range(range),
                             &mut pass,
                         );
