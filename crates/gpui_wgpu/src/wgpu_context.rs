@@ -63,6 +63,15 @@ pub struct CompositorGpuHint {
 }
 
 impl WgpuContext {
+    /// The backend sets to open a context over, in order. Vulkan comes alone so a machine with a
+    /// working driver never pays for the GL stack, and the second entry adds OpenGL for the
+    /// machines that have nothing else.
+    #[cfg(not(target_family = "wasm"))]
+    pub const ATTEMPTS: [wgpu::Backends; 2] = [
+        wgpu::Backends::VULKAN,
+        wgpu::Backends::VULKAN.union(wgpu::Backends::GL),
+    ];
+
     #[cfg(not(target_family = "wasm"))]
     pub fn new(
         instance: wgpu::Instance,
@@ -288,8 +297,19 @@ impl WgpuContext {
 
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> wgpu::Instance {
+        Self::instance_with(display, Self::ATTEMPTS[0])
+    }
+
+    /// An instance over `backends` alone. Prefer walking [`Self::ATTEMPTS`] over asking for
+    /// everything at once: creating an instance initialises every backend in the set, and the
+    /// OpenGL one loads the system GL stack, which on Mesa is libgallium and the LLVM it links.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn instance_with(
+        display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>,
+        backends: wgpu::Backends,
+    ) -> wgpu::Instance {
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
