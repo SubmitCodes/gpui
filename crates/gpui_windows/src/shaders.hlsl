@@ -1204,6 +1204,27 @@ SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentIn
     return output;
 }
 
+MonochromeSpriteVertexOutput subpixel_sprite_layered_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    return monochrome_sprite_vertex(vertex_id, instance_id);
+}
+
+// `subpixel_sprite_fragment`'s dual-source blend always writes alpha = 1, which is
+// fine on the opaque frame but wrong in an offscreen filter layer: those start
+// transparent, and get composited onto their parent by that alpha afterward, so an
+// antialiased glyph pixel would overwrite the parent instead of blending into it.
+// This collapses ClearType's three channels into one coverage value and writes a
+// normal premultiplied color instead, trading subpixel fringing for a correct blend.
+float4 subpixel_sprite_layered_fragment(MonochromeSpriteFragmentInput input): SV_Target {
+    float3 sample = t_sprite.Sample(s_sprite, input.tile_position).rgb;
+    if (is_bgr) {
+        sample = sample.bgr;
+    }
+    float3 alpha_corrected = apply_contrast_and_gamma_correction3(sample, input.color.rgb, subpixel_enhanced_contrast, gamma_ratios);
+    float average_coverage = (alpha_corrected.r + alpha_corrected.g + alpha_corrected.b) / 3.0f;
+    float coverage = input.color.a * average_coverage;
+    return float4(input.color.rgb * coverage, coverage);
+}
+
 /*
 **
 **              Polychrome sprites

@@ -41,6 +41,7 @@ mod shader_compilation {
             "underline",
             "monochrome_sprite",
             "subpixel_sprite",
+            "subpixel_sprite_layered",
             "polychrome_sprite",
         ];
 
