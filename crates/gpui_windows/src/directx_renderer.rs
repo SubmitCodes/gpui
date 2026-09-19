@@ -382,19 +382,18 @@ impl DirectXRenderer {
         Ok(())
     }
 
-    fn open_layer(&self, depth: usize, clear: bool) -> Result<()> {
-        if clear {
-            let resources = self.resources.as_ref().context("resources missing")?;
-            let devices = self.devices.as_ref().context("devices missing")?;
-            let view = resources.filters.layers[depth.min(LAYER_DEPTH - 1)]
-                .view
-                .as_ref()
-                .context("missing layer target")?;
-            unsafe {
-                devices
-                    .device_context
-                    .ClearRenderTargetView(view, &[0.0f32; 4]);
-            }
+    /// Clears one of the offscreen layer targets and points the pipeline at it.
+    fn open_layer(&self, depth: usize) -> Result<()> {
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let view = resources.filters.layers[depth.min(LAYER_DEPTH - 1)]
+            .view
+            .as_ref()
+            .context("missing layer target")?;
+        unsafe {
+            devices
+                .device_context
+                .ClearRenderTargetView(view, &[0.0f32; 4]);
         }
 
         self.open_target(Some(depth))
@@ -833,8 +832,6 @@ impl DirectXRenderer {
         // What each open layer will be composited through: neighbours that ask for the same filter
         // share one target, so a list of separately blurred rows costs one pass, not one per row.
         let mut spans: Vec<Bounds<ScaledPixels>> = Vec::new();
-        let mut cleared = [false; LAYER_DEPTH];
-        let mut transformed_target = [false; LAYER_DEPTH];
 
         let annotation = self
             .devices
@@ -884,12 +881,7 @@ impl DirectXRenderer {
                     break;
                 }
                 let layer = scene.effects[*index];
-                let depth = stack.len();
-                let should_clear =
-                    !cleared[depth] || layer.filter.transforms() || transformed_target[depth];
-                self.open_layer(depth, should_clear)?;
-                cleared[depth] = true;
-                transformed_target[depth] = layer.filter.transforms();
+                self.open_layer(stack.len())?;
                 stack.push(*index);
                 spans.push(layer.destination_clip());
             }

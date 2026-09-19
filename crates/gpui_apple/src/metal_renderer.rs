@@ -747,8 +747,6 @@ impl MetalRenderer {
         // What each open layer will be composited through: neighbours that ask for the same filter
         // share one target, so a list of separately blurred rows costs one pass, not one per row.
         let mut spans: Vec<Bounds<ScaledPixels>> = Vec::new();
-        let mut cleared = [false; LAYER_DEPTH];
-        let mut transformed_target = [false; LAYER_DEPTH];
 
         for batch in scene.batches() {
             let wanted = held
@@ -812,21 +810,13 @@ impl MetalRenderer {
                 let held = held.expect("a filtered layer implies its targets");
                 let layer = scene.effects[*index];
                 let depth = stack.len();
-                let should_clear =
-                    !cleared[depth] || layer.filter.transforms() || transformed_target[depth];
-                let clear = match should_clear {
-                    true => Some(metal::MTLClearColor::new(0., 0., 0., 0.)),
-                    false => None,
-                };
-                cleared[depth] = true;
-                transformed_target[depth] = layer.filter.transforms();
 
                 command_encoder.end_encoding();
                 command_encoder = new_command_encoder_for_texture(
                     command_buffer,
                     &held.layers[depth],
                     viewport_size,
-                    clear,
+                    Some(metal::MTLClearColor::new(0., 0., 0., 0.)),
                 );
                 stack.push(*index);
                 spans.push(layer.destination_clip());
