@@ -382,6 +382,17 @@ impl DirectXRenderer {
         Ok(())
     }
 
+    /// Points the pipeline back at what the batch in hand is drawing into: the innermost open
+    /// layer, or the frame when none is open. Anything that binds a target of its own has to come
+    /// back through here, or the primitives after it land in the window while the rest of the
+    /// frame is still being assembled somewhere else.
+    fn resume_target(&self, stack: &[usize], mirrored: bool) -> Result<()> {
+        match stack.len().checked_sub(1) {
+            Some(depth) => self.open_target(Some(depth)),
+            None => self.restore_frame(mirrored),
+        }
+    }
+
     /// Clears one of the offscreen layer targets and points the pipeline at it.
     fn open_layer(&self, depth: usize) -> Result<()> {
         let resources = self.resources.as_ref().context("resources missing")?;
@@ -892,6 +903,7 @@ impl DirectXRenderer {
                 PrimitiveBatch::Paths(range) => {
                     let paths = &scene.paths[range];
                     self.draw_paths_to_intermediate(paths)?;
+                    self.resume_target(&stack, mirrored)?;
                     self.draw_paths_from_intermediate(paths)
                 }
                 PrimitiveBatch::Underlines(range) => self.draw_underlines(range.start, range.len()),
@@ -1141,10 +1153,6 @@ impl DirectXRenderer {
                 0,
                 RENDER_TARGET_FORMAT,
             );
-            // Restore main render target
-            devices
-                .device_context
-                .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
         }
 
         Ok(())
