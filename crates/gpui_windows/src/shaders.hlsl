@@ -1204,10 +1204,8 @@ SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentIn
     return output;
 }
 
-MonochromeSpriteVertexOutput subpixel_sprite_layered_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
-    return monochrome_sprite_vertex(vertex_id, instance_id);
-}
-
+// Drawn from `subpixel_sprite_vertex`, so this half has no vertex entry point of its own.
+//
 // `subpixel_sprite_fragment`'s dual-source blend always writes alpha = 1, which is
 // fine on the opaque frame but wrong in an offscreen filter layer: those start
 // transparent, and get composited onto their parent by that alpha afterward, so an

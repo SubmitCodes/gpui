@@ -180,7 +180,7 @@ struct DirectXRenderPipelines {
     underline_pipeline: PipelineState<Underline>,
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
-    subpixel_sprites_layered: PipelineState<SubpixelSprite>,
+    subpixel_sprites_layered: Shading,
     poly_sprites: PipelineState<PolychromeSprite>,
 }
 
@@ -471,6 +471,7 @@ impl DirectXRenderer {
         pipeline.update_buffer(&device, &device_context, &params)?;
         pipeline.draw_range_with_texture(
             &device_context,
+            None,
             slice::from_ref(&blurred),
             &batch_params,
             slice::from_ref(&Some(sampler)),
@@ -580,6 +581,7 @@ impl DirectXRenderer {
         pipeline.update_buffer(&device, &device_context, &[params.unwrap_or_default()])?;
         pipeline.draw_range_with_texture(
             &device_context,
+            None,
             slice::from_ref(&source),
             &batch_params,
             slice::from_ref(&Some(sampler)),
@@ -612,6 +614,7 @@ impl DirectXRenderer {
 
         self.pipelines.backdrop_pipeline.draw_range_with_texture(
             &device_context,
+            None,
             slice::from_ref(&blurred),
             &batch_params,
             slice::from_ref(&Some(sampler)),
@@ -658,6 +661,7 @@ impl DirectXRenderer {
         )?;
         self.pipelines.blit_pipeline.draw_range_with_texture(
             &device_context,
+            None,
             slice::from_ref(&source),
             &batch_params,
             slice::from_ref(&Some(sampler)),
@@ -1056,15 +1060,6 @@ impl DirectXRenderer {
                 &devices.device_context,
                 &scene.subpixel_sprites,
             )?;
-            // Most frames have no open opacity/blur layer at all, so skip this pipeline's
-            // upload of the same instances unless one could actually draw from it.
-            if !scene.effects.is_empty() {
-                self.pipelines.subpixel_sprites_layered.update_buffer(
-                    &devices.device,
-                    &devices.device_context,
-                    &scene.subpixel_sprites,
-                )?;
-            }
         }
 
         if !scene.polychrome_sprites.is_empty() {
@@ -1242,6 +1237,7 @@ impl DirectXRenderer {
         let texture_view = self.atlas.get_texture_view(texture_id);
         self.pipelines.mono_sprites.draw_range_with_texture(
             &devices.device_context,
+            None,
             &texture_view,
             self.globals
                 .batch_params_buffer
@@ -1271,12 +1267,13 @@ impl DirectXRenderer {
             .as_ref()
             .context("batch params buffer missing")?;
         // See `subpixel_sprite_layered_fragment` for why a layer needs a different blend.
-        let pipeline = match into_layer {
-            true => &mut self.pipelines.subpixel_sprites_layered,
-            false => &mut self.pipelines.subpixel_sprites,
+        let shading = match into_layer {
+            true => Some(&self.pipelines.subpixel_sprites_layered),
+            false => None,
         };
-        pipeline.draw_range_with_texture(
+        self.pipelines.subpixel_sprites.draw_range_with_texture(
             &devices.device_context,
+            shading,
             &texture_view,
             batch_params,
             slice::from_ref(&self.globals.sampler),
@@ -1298,6 +1295,7 @@ impl DirectXRenderer {
         let texture_view = self.atlas.get_texture_view(texture_id);
         self.pipelines.poly_sprites.draw_range_with_texture(
             &devices.device_context,
+            None,
             &texture_view,
             self.globals
                 .batch_params_buffer
@@ -1524,13 +1522,11 @@ impl DirectXRenderPipelines {
             512,
             create_blend_state_for_subpixel_rendering(device)?,
         )?;
-        // Same glyphs, for when they land in an offscreen layer instead of the frame;
+        // The same glyphs, for when they land in an offscreen layer instead of the frame;
         // see `subpixel_sprite_layered_fragment`.
-        let subpixel_sprites_layered = PipelineState::new(
+        let subpixel_sprites_layered = Shading::new(
             device,
-            "subpixel_sprite_layered_pipeline",
             ShaderModule::SubpixelSpriteLayered,
-            512,
             create_blend_state_premultiplied(device)?,
         )?;
         let poly_sprites = PipelineState::new(
@@ -1643,6 +1639,30 @@ struct PipelineState<T> {
     view: Option<ID3D11ShaderResourceView>,
     blend_state: ID3D11BlendState,
     _marker: std::marker::PhantomData<T>,
+}
+
+/// A second way to shade a pipeline's instances: its own fragment stage and blend over the
+/// vertex stage and the instance buffer of the pipeline it is handed to.
+struct Shading {
+    fragment: ID3D11PixelShader,
+    blend_state: ID3D11BlendState,
+}
+
+impl Shading {
+    /// Takes the fragment stage of `shader_module`. The module needs no vertex entry point of
+    /// its own, since the draw keeps the pipeline's.
+    fn new(
+        device: &ID3D11Device,
+        shader_module: ShaderModule,
+        blend_state: ID3D11BlendState,
+    ) -> Result<Self> {
+        let raw_shader = RawShaderBytes::new(shader_module, ShaderTarget::Fragment)?;
+        let fragment = create_fragment_shader(device, raw_shader.as_bytes())?;
+        Ok(Shading {
+            fragment,
+            blend_state,
+        })
+    }
 }
 
 impl<T> PipelineState<T> {
@@ -1782,9 +1802,13 @@ impl<T> PipelineState<T> {
         Ok(())
     }
 
+    /// Draws a range of this pipeline's instances. `shading` replaces the fragment stage and
+    /// the blend for this draw alone, which is how one batch of instances is drawn two ways
+    /// without a second copy of it on the GPU.
     fn draw_range_with_texture(
         &self,
         device_context: &ID3D11DeviceContext,
+        shading: Option<&Shading>,
         texture: &[Option<ID3D11ShaderResourceView>],
         batch_params_buffer: &ID3D11Buffer,
         sampler: &[Option<ID3D11SamplerState>],
@@ -1796,14 +1820,18 @@ impl<T> PipelineState<T> {
             "DirectX instance range exceeds the {} buffer",
             self.label
         );
+        let (fragment, blend_state) = match shading {
+            Some(shading) => (&shading.fragment, &shading.blend_state),
+            None => (&self.fragment, &self.blend_state),
+        };
         update_batch_start(device_context, batch_params_buffer, first_instance)?;
         set_pipeline_state(
             device_context,
             slice::from_ref(&self.view),
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             &self.vertex,
-            &self.fragment,
-            &self.blend_state,
+            fragment,
+            blend_state,
         );
         unsafe {
             device_context.PSSetSamplers(0, Some(sampler));
@@ -2342,6 +2370,7 @@ pub(crate) mod shader_resources {
         PathSprite,
         MonochromeSprite,
         SubpixelSprite,
+        /// Fragment only. `vertex_source` sends it to `SubpixelSprite` for a vertex stage.
         SubpixelSpriteLayered,
         PolychromeSprite,
         EmojiRasterization,
@@ -2360,8 +2389,23 @@ pub(crate) mod shader_resources {
         _blob: ID3DBlob,
     }
 
+    impl ShaderModule {
+        /// Where the vertex stage of this module comes from. A fragment-only module borrows
+        /// another's, so asking it for a vertex shader answers with that one.
+        fn vertex_source(self) -> ShaderModule {
+            match self {
+                ShaderModule::SubpixelSpriteLayered => ShaderModule::SubpixelSprite,
+                module => module,
+            }
+        }
+    }
+
     impl<'t> RawShaderBytes<'t> {
         pub(crate) fn new(module: ShaderModule, target: ShaderTarget) -> Result<Self> {
+            let module = match target {
+                ShaderTarget::Vertex => module.vertex_source(),
+                ShaderTarget::Fragment => module,
+            };
             #[cfg(not(debug_assertions))]
             {
                 Ok(Self::from_bytes(module, target))
@@ -2431,7 +2475,7 @@ pub(crate) mod shader_resources {
                     ShaderTarget::Fragment => SUBPIXEL_SPRITE_FRAGMENT_BYTES,
                 },
                 ShaderModule::SubpixelSpriteLayered => match target {
-                    ShaderTarget::Vertex => SUBPIXEL_SPRITE_LAYERED_VERTEX_BYTES,
+                    ShaderTarget::Vertex => SUBPIXEL_SPRITE_VERTEX_BYTES,
                     ShaderTarget::Fragment => SUBPIXEL_SPRITE_LAYERED_FRAGMENT_BYTES,
                 },
                 ShaderModule::PolychromeSprite => match target {
