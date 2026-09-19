@@ -383,19 +383,29 @@ impl DirectXRenderer {
         Ok(())
     }
 
-    fn open_layer(&self, depth: usize, clear: bool) -> Result<()> {
-        if clear {
-            let resources = self.resources.as_ref().context("resources missing")?;
-            let devices = self.devices.as_ref().context("devices missing")?;
-            let view = resources.filters.layers[depth.min(LAYER_DEPTH - 1)]
-                .view
-                .as_ref()
-                .context("missing layer target")?;
-            unsafe {
-                devices
-                    .device_context
-                    .ClearRenderTargetView(view, &[0.0f32; 4]);
-            }
+    /// Points the pipeline back at what the batch in hand is drawing into: the innermost open
+    /// layer, or the frame when none is open. Anything that binds a target of its own has to come
+    /// back through here, or the primitives after it land in the window while the rest of the
+    /// frame is still being assembled somewhere else.
+    fn resume_target(&self, stack: &[usize], mirrored: bool) -> Result<()> {
+        match stack.len().checked_sub(1) {
+            Some(depth) => self.open_target(Some(depth)),
+            None => self.restore_frame(mirrored),
+        }
+    }
+
+    /// Clears one of the offscreen layer targets and points the pipeline at it.
+    fn open_layer(&self, depth: usize) -> Result<()> {
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let view = resources.filters.layers[depth.min(LAYER_DEPTH - 1)]
+            .view
+            .as_ref()
+            .context("missing layer target")?;
+        unsafe {
+            devices
+                .device_context
+                .ClearRenderTargetView(view, &[0.0f32; 4]);
         }
 
         self.open_target(Some(depth))
@@ -488,9 +498,13 @@ impl DirectXRenderer {
             .unwrap_or(BLUR_STEPS.len() - 1);
         let shrink = BLUR_STEPS[step] as f32;
         // Each pass reads a kernel's width beyond what the next one needs, so the region grows
-        // from the composited clip outwards.
+        // from the composited clip outwards. Every one reaches a texel further still: the
+        // blurred texture is sampled at full resolution, so a fragment on the clip's own edge
+        // draws part of its colour from the texel outside it, which nothing has written.
         let region = |renderer: &Self, margin: f32, shrink: u32| match clip {
-            Some(clip) => renderer.scissor(clip.dilate(ScaledPixels(margin)), shrink),
+            Some(clip) => {
+                renderer.scissor(clip.dilate(ScaledPixels(margin + shrink as f32)), shrink)
+            }
             None => Ok(None),
         };
 
@@ -830,8 +844,6 @@ impl DirectXRenderer {
         // What each open layer will be composited through: neighbours that ask for the same filter
         // share one target, so a list of separately blurred rows costs one pass, not one per row.
         let mut spans: Vec<Bounds<ScaledPixels>> = Vec::new();
-        let mut cleared = [false; LAYER_DEPTH];
-        let mut transformed_target = [false; LAYER_DEPTH];
 
         let annotation = self
             .devices
@@ -881,12 +893,7 @@ impl DirectXRenderer {
                     break;
                 }
                 let layer = scene.effects[*index];
-                let depth = stack.len();
-                let should_clear =
-                    !cleared[depth] || layer.filter.transforms() || transformed_target[depth];
-                self.open_layer(depth, should_clear)?;
-                cleared[depth] = true;
-                transformed_target[depth] = layer.filter.transforms();
+                self.open_layer(stack.len())?;
                 stack.push(*index);
                 spans.push(layer.destination_clip());
             }
@@ -897,6 +904,7 @@ impl DirectXRenderer {
                 PrimitiveBatch::Paths(range) => {
                     let paths = &scene.paths[range];
                     self.draw_paths_to_intermediate(paths)?;
+                    self.resume_target(&stack, mirrored)?;
                     self.draw_paths_from_intermediate(paths)
                 }
                 PrimitiveBatch::Underlines(range) => self.draw_underlines(range.start, range.len()),
@@ -1156,10 +1164,6 @@ impl DirectXRenderer {
                 0,
                 RENDER_TARGET_FORMAT,
             );
-            // Restore main render target
-            devices
-                .device_context
-                .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
         }
 
         Ok(())

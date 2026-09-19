@@ -1357,10 +1357,12 @@ impl WgpuRenderer {
         let blur = self.resources().pipelines.blur.clone();
 
         // Each pass reads a kernel's width beyond what the next one needs, so the region grows
-        // from the composited clip outwards.
-        let reached = |clip: Bounds<ScaledPixels>, margin: f32| clip.dilate(ScaledPixels(margin));
+        // from the composited clip outwards. Every one reaches a texel further still: the
+        // blurred texture is sampled at full resolution, so a fragment on the clip's own edge
+        // draws part of its colour from the texel outside it, which nothing has written.
         let within = |clip: Option<Bounds<ScaledPixels>>, margin: f32, shrink: u32| {
-            clip.map(|clip| self.scissor(reached(clip, margin), shrink))
+            let reach = ScaledPixels(margin + shrink as f32);
+            clip.map(|clip| self.scissor(clip.dilate(reach), shrink))
         };
 
         let mut from = source;
@@ -1920,13 +1922,16 @@ impl WgpuRenderer {
                 ..Default::default()
             });
 
+            // Where the pass in hand is drawing: the frame, or the layer being filled when one
+            // is open. Anything that has to break the pass and resume it has to resume it here,
+            // or its primitives land in the window while the rest of the frame is still being
+            // assembled somewhere else.
+            let mut target = main_view;
             let mut stack: Vec<usize> = Vec::new();
             // What each open layer will be composited through: neighbours that ask for the same
             // filter share one target, so a list of separately blurred rows costs one pass, not one
             // per row.
             let mut spans: Vec<Bounds<ScaledPixels>> = Vec::new();
-            let mut cleared = [false; LAYER_DEPTH];
-            let mut transformed_target = [false; LAYER_DEPTH];
             for batch in scene.batches() {
                 let wanted = views
                     .as_ref()
@@ -1986,10 +1991,11 @@ impl WgpuRenderer {
                         &mut instance_offset,
                         &[mask_params(layer, clip)],
                     )?;
+                    target = onto;
                     pass = Self::resume_pass(
                         &mut encoder,
                         "layer_composite_pass",
-                        onto,
+                        target,
                         wgpu::LoadOp::Load,
                     );
                     self.composite_layer(
@@ -2010,17 +2016,11 @@ impl WgpuRenderer {
                         .as_ref()
                         .expect("a filtered layer implies its targets");
                     let depth = stack.len();
-                    let should_clear =
-                        !cleared[depth] || layer.filter.transforms() || transformed_target[depth];
-                    let load = match should_clear {
-                        true => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        false => wgpu::LoadOp::Load,
-                    };
-                    cleared[depth] = true;
-                    transformed_target[depth] = layer.filter.transforms();
+                    let load = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
 
                     drop(pass);
-                    pass = Self::resume_pass(&mut encoder, "layer_pass", &held.layers[depth], load);
+                    target = &held.layers[depth];
+                    pass = Self::resume_pass(&mut encoder, "layer_pass", target, load);
                     stack.push(*index);
                     spans.push(layer.destination_clip());
                 }
@@ -2051,20 +2051,12 @@ impl WgpuRenderer {
                             &mut instance_offset,
                         )?;
 
-                        pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("main_pass_continued"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: frame_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                                depth_slice: None,
-                            })],
-                            depth_stencil_attachment: None,
-                            ..Default::default()
-                        });
+                        pass = Self::resume_pass(
+                            &mut encoder,
+                            "main_pass_continued",
+                            target,
+                            wgpu::LoadOp::Load,
+                        );
 
                         if rasterized {
                             self.draw_paths_from_intermediate(
@@ -2124,7 +2116,6 @@ impl WgpuRenderer {
                             .iter()
                             .map(|backdrop| backdrop.bounds)
                             .reduce(|union, bounds| union.union(&bounds));
-
                         drop(pass);
                         let frame = views.frame.clone();
                         let blurred = self.blur_source(
@@ -2138,7 +2129,7 @@ impl WgpuRenderer {
                         pass = Self::resume_pass(
                             &mut encoder,
                             "main_pass_continued",
-                            main_view,
+                            target,
                             wgpu::LoadOp::Load,
                         );
 
@@ -2184,10 +2175,11 @@ impl WgpuRenderer {
                     &mut instance_offset,
                     &[mask_params(layer, clip)],
                 )?;
+                target = onto;
                 pass = Self::resume_pass(
                     &mut encoder,
                     "layer_composite_pass",
-                    onto,
+                    target,
                     wgpu::LoadOp::Load,
                 );
                 self.composite_layer(

@@ -1036,6 +1036,12 @@ impl App {
         self.platform.is_cursor_visible()
     }
 
+    /// Hides the OS cursor until the mouse next moves. Fullscreen stages call
+    /// this as their chrome fades out; any pointer motion brings it back.
+    pub fn hide_cursor(&self) {
+        self.platform.hide_cursor_until_mouse_moves();
+    }
+
     /// Returns whether non-essential animations (e.g. loading spinners) should
     /// be rendered in a static state instead of animating.
     pub fn reduce_motion(&self) -> bool {
