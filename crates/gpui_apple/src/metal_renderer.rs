@@ -1228,11 +1228,12 @@ impl MetalRenderer {
             &viewport_size as *const Size<DevicePixels> as *const _,
         );
         command_encoder.set_fragment_texture(FilterInputIndex::Source as u64, Some(source));
-        command_encoder.draw_primitives_instanced(
+        command_encoder.draw_primitives_instanced_base_instance(
             metal::MTLPrimitiveType::Triangle,
             0,
             6,
             backdrops.len() as u64,
+            backdrops.start as u64,
         );
     }
 
