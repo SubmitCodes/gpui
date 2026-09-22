@@ -741,9 +741,23 @@ impl Style {
             return self.paint_sharp(bounds, window, cx, continuation);
         }
 
-        window.with_filter(bounds, self.filter, |window| {
+        window.with_filter(bounds, self.filter, self.shadow_reach(), |window| {
             self.paint_sharp(bounds, window, cx, continuation)
         });
+    }
+
+    /// How far this element's drop shadows reach past its bounds, the gaussian tail included,
+    /// which is the room a layer opened for its filter has to keep.
+    fn shadow_reach(&self) -> Pixels {
+        self.box_shadow
+            .iter()
+            .filter(|shadow| !shadow.inset)
+            .map(|shadow| {
+                shadow.offset.x.abs().max(shadow.offset.y.abs())
+                    + shadow.spread_radius
+                    + shadow.blur_radius * 3.
+            })
+            .fold(Pixels::ZERO, Pixels::max)
     }
 
     fn paint_sharp(

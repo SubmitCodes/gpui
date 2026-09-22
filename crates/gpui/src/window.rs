@@ -4220,13 +4220,17 @@ impl Window {
     }
 
     /// Paints everything the callback draws into an offscreen layer, applies the given effects,
-    /// and composites the result back into the frame.
+    /// and composites the result back into the frame. `reach` is how far past `bounds` the
+    /// element paints on its own, its drop shadows, so the layer keeps room for them rather
+    /// than clipping them until the filter lets go. An edge fade is measured from the layer's
+    /// edge, so a layer that fades keeps no such room.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn with_filter<R>(
         &mut self,
         bounds: Bounds<Pixels>,
         filter: LayerFilter,
+        reach: Pixels,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         self.invalidator.debug_assert_paint();
@@ -4269,7 +4273,12 @@ impl Window {
                 ),
             None => element_bounds.center(),
         };
-        let source_bounds = element_bounds.dilate(ScaledPixels(filter.blur * BLUR_REACH));
+        let fades = filter.fade_top + filter.fade_bottom + filter.fade_left + filter.fade_right;
+        let reach = match fades > 0. {
+            true => 0.,
+            false => reach.0.max(0.) * scale_factor,
+        };
+        let source_bounds = element_bounds.dilate(ScaledPixels(filter.blur * BLUR_REACH + reach));
         let content_mask = self.snapped_content_mask().bounds;
         self.next_frame
             .scene
