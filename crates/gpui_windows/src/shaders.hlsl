@@ -1327,6 +1327,12 @@ BackdropVertexOutput backdrop_vertex(uint vertex_id: SV_VertexID, uint instance_
     return output;
 }
 
+// A backdrop replaces what it covers with the blurred copy of it rather than laying that copy
+// over it: `dst = mix(dst, blurred, k)`, k being the coverage times the instance's opacity.
+// Over an opaque frame the two are one picture, since a copy of alpha one hides what it
+// covers; over a see-through window laying it over left `a + a(1 - a)` where the window asked
+// for `a`. The mix is two draws over one instance buffer: `backdrop_punch_fragment` for
+// `dst *= (1 - k)`, then this one, added on top.
 float4 backdrop_fragment(BackdropFragmentInput input): SV_Target {
     Backdrop backdrop = backdrops[input.backdrop_id];
     float2 position = input.position.xy;
@@ -1335,6 +1341,17 @@ float4 backdrop_fragment(BackdropFragmentInput input): SV_Target {
     float coverage = saturate(0.5 - distance);
 
     return sampled * coverage * backdrop.opacity;
+}
+
+// The hole the blurred copy lands in: alpha alone, blended so what it covers keeps `1 - k` of
+// itself, colour and alpha together.
+float4 backdrop_punch_fragment(BackdropFragmentInput input): SV_Target {
+    Backdrop backdrop = backdrops[input.backdrop_id];
+    float2 position = input.position.xy;
+    float distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+    float coverage = saturate(0.5 - distance);
+
+    return float4(0.0, 0.0, 0.0, coverage * backdrop.opacity);
 }
 
 /*

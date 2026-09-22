@@ -169,6 +169,7 @@ enum Pass {
 
 struct DirectXRenderPipelines {
     backdrop_pipeline: PipelineState<Backdrop>,
+    backdrop_punch: Shading,
     blur_pipeline: PipelineState<FilterParams>,
     blit_pipeline: PipelineState<FilterParams>,
     composite_pipeline: PipelineState<FilterParams>,
@@ -612,6 +613,17 @@ impl DirectXRenderer {
 
         let (_, device_context, sampler, batch_params) = self.pipeline_handles()?;
 
+        // The hole first, the blurred copy into it second: together they are
+        // `dst = mix(dst, blurred, k)`, which leaves a see-through window as clear as it was.
+        self.pipelines.backdrop_pipeline.draw_range_with_texture(
+            &device_context,
+            Some(&self.pipelines.backdrop_punch),
+            slice::from_ref(&blurred),
+            &batch_params,
+            slice::from_ref(&Some(sampler.clone())),
+            first as u32,
+            count as u32,
+        )?;
         self.pipelines.backdrop_pipeline.draw_range_with_texture(
             &device_context,
             None,
@@ -1438,12 +1450,20 @@ impl DirectXResources {
 
 impl DirectXRenderPipelines {
     pub fn new(device: &ID3D11Device) -> Result<Self> {
+        // A backdrop mixes the blurred copy into what it covers instead of laying it over:
+        // the punch scales the destination by `1 - k`, the additive draw after it adds
+        // `blurred * k`. Laying it over cost a see-through window its transparency.
         let backdrop_pipeline = PipelineState::new(
             device,
             "backdrop_pipeline",
             ShaderModule::Backdrop,
             16,
-            create_blend_state_premultiplied(device)?,
+            create_blend_state_additive(device)?,
+        )?;
+        let backdrop_punch = Shading::new(
+            device,
+            ShaderModule::BackdropPunch,
+            create_blend_state_punch(device)?,
         )?;
         let blur_pipeline = PipelineState::new(
             device,
@@ -1539,6 +1559,7 @@ impl DirectXRenderPipelines {
 
         Ok(Self {
             backdrop_pipeline,
+            backdrop_punch,
             blur_pipeline,
             blit_pipeline,
             composite_pipeline,
@@ -2105,6 +2126,46 @@ fn create_blend_state_premultiplied(device: &ID3D11Device) -> Result<ID3D11Blend
     }
 }
 
+/// The first half of a backdrop's mix: the source contributes nothing of its own and the
+/// destination keeps `1 - src.a` of itself, colour and alpha together, so the blurred copy
+/// drawn after it lands in a hole rather than on top of what it replaces.
+#[inline]
+fn create_blend_state_punch(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = true.into();
+    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ZERO;
+    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+/// The second half: the blurred copy is added into the hole the punch left.
+#[inline]
+fn create_blend_state_additive(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = true.into();
+    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
 /// Blur and blit passes own every pixel they touch.
 #[inline]
 fn create_blend_state_opaque(device: &ID3D11Device) -> Result<ID3D11BlendState> {
@@ -2360,6 +2421,8 @@ pub(crate) mod shader_resources {
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub(crate) enum ShaderModule {
         Backdrop,
+        /// Fragment only. `vertex_source` sends it to `Backdrop` for a vertex stage.
+        BackdropPunch,
         Blur,
         Blit,
         Mask,
@@ -2394,6 +2457,7 @@ pub(crate) mod shader_resources {
         /// another's, so asking it for a vertex shader answers with that one.
         fn vertex_source(self) -> ShaderModule {
             match self {
+                ShaderModule::BackdropPunch => ShaderModule::Backdrop,
                 ShaderModule::SubpixelSpriteLayered => ShaderModule::SubpixelSprite,
                 module => module,
             }
@@ -2433,6 +2497,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::Backdrop => match target {
                     ShaderTarget::Vertex => BACKDROP_VERTEX_BYTES,
                     ShaderTarget::Fragment => BACKDROP_FRAGMENT_BYTES,
+                },
+                ShaderModule::BackdropPunch => match target {
+                    ShaderTarget::Vertex => BACKDROP_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BACKDROP_PUNCH_FRAGMENT_BYTES,
                 },
                 ShaderModule::Blur => match target {
                     ShaderTarget::Vertex => BLUR_VERTEX_BYTES,
@@ -2565,6 +2633,7 @@ pub(crate) mod shader_resources {
         pub fn as_str(self) -> &'static str {
             match self {
                 ShaderModule::Backdrop => "backdrop",
+                ShaderModule::BackdropPunch => "backdrop_punch",
                 ShaderModule::Blur => "blur",
                 ShaderModule::Blit => "blit",
                 ShaderModule::Mask => "mask",

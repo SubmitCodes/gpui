@@ -32,6 +32,7 @@ mod shader_compilation {
         // does not is drawn from another module's, so only its fragment half is compiled.
         let modules = [
             ("backdrop", true),
+            ("backdrop_punch", false),
             ("blur", true),
             ("blit", true),
             ("mask", true),

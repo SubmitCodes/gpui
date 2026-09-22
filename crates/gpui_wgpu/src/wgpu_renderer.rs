@@ -123,6 +123,7 @@ pub struct WgpuSurfaceConfig {
 
 struct WgpuPipelines {
     backdrops: wgpu::RenderPipeline,
+    backdrop_punch: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
     blit: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
@@ -978,6 +979,57 @@ impl WgpuRenderer {
             })
         };
 
+        // A backdrop mixes the blurred copy into what it covers instead of laying it over:
+        // the punch pass scales the destination by `1 - k` and the draw over it adds
+        // `blurred * k`. Laying it over cost a see-through window its transparency, since a
+        // copy of alpha `a` over the same `a` leaves `a + a(1 - a)`.
+        let backdrop_punch_target = wgpu::ColorTargetState {
+            format: surface_format,
+            blend: Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+
+        let backdrop_target = wgpu::ColorTargetState {
+            format: surface_format,
+            blend: Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+
+        let backdrop_punch = create_pipeline(
+            "backdrop_punch",
+            "vs_backdrop",
+            "fs_backdrop_punch",
+            &layouts.globals,
+            &layouts.instances,
+            Some(&layouts.texture),
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[Some(backdrop_punch_target)],
+            1,
+            &shader_module,
+        );
+
         let backdrops = create_pipeline(
             "backdrops",
             "vs_backdrop",
@@ -986,7 +1038,7 @@ impl WgpuRenderer {
             &layouts.instances,
             Some(&layouts.texture),
             wgpu::PrimitiveTopology::TriangleStrip,
-            &[Some(premultiplied_target.clone())],
+            &[Some(backdrop_target)],
             1,
             &shader_module,
         );
@@ -1225,6 +1277,7 @@ impl WgpuRenderer {
 
         WgpuPipelines {
             backdrops,
+            backdrop_punch,
             blur,
             blit,
             composite,
@@ -1457,7 +1510,7 @@ impl WgpuRenderer {
 
     fn draw_backdrops(
         &self,
-        instances: &InstanceBinding,
+        binding: &InstanceBinding,
         blurred: &wgpu::TextureView,
         range: Range<u32>,
         pass: &mut wgpu::RenderPass<'_>,
@@ -1466,14 +1519,17 @@ impl WgpuRenderer {
             return;
         }
         let texture = self.create_texture_bind_group("backdrop_blurred_bind_group", blurred);
-        pass.set_pipeline(&self.resources().pipelines.backdrops);
+        let instances =
+            binding.first_instance + range.start..binding.first_instance + range.end;
         pass.set_bind_group(0, &self.resources().globals_bind_group, &[]);
-        pass.set_bind_group(1, &instances.bind_group, &[]);
+        pass.set_bind_group(1, &binding.bind_group, &[]);
         pass.set_bind_group(2, &texture, &[]);
-        pass.draw(
-            0..4,
-            instances.first_instance + range.start..instances.first_instance + range.end,
-        );
+        // The hole first, the blurred copy into it second: together they are
+        // `dst = mix(dst, blurred, k)`, which leaves a see-through window as clear as it was.
+        pass.set_pipeline(&self.resources().pipelines.backdrop_punch);
+        pass.draw(0..4, instances.clone());
+        pass.set_pipeline(&self.resources().pipelines.backdrops);
+        pass.draw(0..4, instances);
     }
 
     fn backdrop_views(&self) -> Option<BackdropViews> {

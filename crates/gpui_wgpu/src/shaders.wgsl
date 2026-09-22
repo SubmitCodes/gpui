@@ -1392,6 +1392,15 @@ fn vs_backdrop(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) i
     return out;
 }
 
+// A backdrop replaces what it covers with the blurred copy of it rather than laying that copy
+// on top: `dst = mix(dst, blurred, k)`, where k is the coverage times the instance's opacity.
+// Over an opaque frame the two are the same picture, since a copy of alpha one hides whatever
+// it is laid over. Over a see-through window they are not: a copy of alpha `a` laid over the
+// same `a` leaves `a + a(1 - a)`, so every frosted surface came out denser than the window
+// around it, at its worst exactly halfway down the transparency slider. The mix takes two
+// draws over one instance buffer, `fs_backdrop_punch` for `dst *= (1 - k)` and this one, drawn
+// additively, for `dst += blurred * k`; a single blend cannot carry both k and the sample's
+// own alpha out of one fragment.
 @fragment
 fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
     if (any(input.clip_distances < vec4<f32>(0.0))) {
@@ -1405,6 +1414,22 @@ fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
     let coverage = saturate(0.5 - distance);
 
     return sampled * coverage * backdrop.opacity;
+}
+
+/// The hole the blurred copy lands in: alpha alone, blended so the destination keeps `1 - k`
+/// of itself, colour and alpha together.
+@fragment
+fn fs_backdrop_punch(input: BackdropVarying) -> @location(0) vec4<f32> {
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    let backdrop = load_backdrop(input.backdrop_id);
+    let position = input.position.xy;
+    let distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+    let coverage = saturate(0.5 - distance);
+
+    return vec4<f32>(0.0, 0.0, 0.0, coverage * backdrop.opacity);
 }
 
 // --- blur --- //

@@ -1323,6 +1323,12 @@ vertex BackdropVertexOutput backdrop_vertex(
   return BackdropVertexOutput{device_position, backdrop_id, clip_distance};
 }
 
+// A backdrop replaces what it covers with the blurred copy of it rather than laying that copy
+// over it: `dst = mix(dst, blurred, k)`, k being the coverage times the instance's opacity.
+// Over an opaque frame the two are one picture, since a copy of alpha one hides whatever it
+// covers; over a see-through window they are not, and laying it over left `a + a(1 - a)`
+// where the window asked for `a`. The mix is two draws over one instance buffer:
+// `backdrop_punch_fragment` for `dst *= (1 - k)`, then this one, added on top.
 fragment float4 backdrop_fragment(
     BackdropFragmentInput input [[stage_in]],
     constant Backdrop *backdrops [[buffer(FilterInputIndex_Backdrops)]],
@@ -1343,6 +1349,26 @@ fragment float4 backdrop_fragment(
   float coverage = saturate(0.5 - distance);
 
   return sampled * coverage * backdrop.opacity;
+}
+
+// The hole the blurred copy lands in: alpha alone, blended so what it covers keeps `1 - k` of
+// itself, colour and alpha together.
+fragment float4 backdrop_punch_fragment(
+    BackdropFragmentInput input [[stage_in]],
+    constant Backdrop *backdrops [[buffer(FilterInputIndex_Backdrops)]],
+    constant Size_DevicePixels *viewport_size
+    [[buffer(FilterInputIndex_ViewportSize)]],
+    texture2d<float> source [[texture(FilterInputIndex_Source)]]) {
+  if (any(input.clip_distance < float4(0.0))) {
+    return float4(0.0);
+  }
+
+  Backdrop backdrop = backdrops[input.backdrop_id];
+  float2 position = input.position.xy;
+  float distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+  float coverage = saturate(0.5 - distance);
+
+  return float4(0.0, 0.0, 0.0, coverage * backdrop.opacity);
 }
 
 fragment float4 blur_fragment(

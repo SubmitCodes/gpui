@@ -134,6 +134,7 @@ pub struct MetalRenderer {
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
     backdrops_pipeline_state: metal::RenderPipelineState,
+    backdrop_punch_pipeline_state: metal::RenderPipelineState,
     blur_pipeline_state: metal::RenderPipelineState,
     blit_pipeline_state: metal::RenderPipelineState,
     composite_pipeline_state: metal::RenderPipelineState,
@@ -337,6 +338,9 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
         );
 
+        // A backdrop mixes the blurred copy into what it covers rather than laying it over:
+        // the punch scales the destination by `1 - k`, the draw after it adds `blurred * k`.
+        // Laying it over cost a see-through window its transparency.
         let backdrops_pipeline_state = build_filter_pipeline_state(
             &device,
             &library,
@@ -344,7 +348,16 @@ impl MetalRenderer {
             "backdrop_vertex",
             "backdrop_fragment",
             MTLPixelFormat::BGRA8Unorm,
-            true,
+            FilterBlend::Add,
+        );
+        let backdrop_punch_pipeline_state = build_filter_pipeline_state(
+            &device,
+            &library,
+            "backdrop_punch",
+            "backdrop_vertex",
+            "backdrop_punch_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+            FilterBlend::Punch,
         );
         let blur_pipeline_state = build_filter_pipeline_state(
             &device,
@@ -353,7 +366,7 @@ impl MetalRenderer {
             "filter_vertex",
             "blur_fragment",
             MTLPixelFormat::BGRA8Unorm,
-            false,
+            FilterBlend::Replace,
         );
         let blit_pipeline_state = build_filter_pipeline_state(
             &device,
@@ -362,7 +375,7 @@ impl MetalRenderer {
             "filter_vertex",
             "blit_fragment",
             MTLPixelFormat::BGRA8Unorm,
-            false,
+            FilterBlend::Replace,
         );
         let composite_pipeline_state = build_filter_pipeline_state(
             &device,
@@ -371,7 +384,7 @@ impl MetalRenderer {
             "filter_vertex",
             "mask_fragment",
             MTLPixelFormat::BGRA8Unorm,
-            true,
+            FilterBlend::Over,
         );
         let masked_pipeline_state = build_filter_pipeline_state(
             &device,
@@ -380,7 +393,7 @@ impl MetalRenderer {
             "filter_vertex",
             "mask_fragment",
             MTLPixelFormat::BGRA8Unorm,
-            true,
+            FilterBlend::Over,
         );
 
         let command_queue = device.new_command_queue();
@@ -405,6 +418,7 @@ impl MetalRenderer {
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
             backdrops_pipeline_state,
+            backdrop_punch_pipeline_state,
             blur_pipeline_state,
             blit_pipeline_state,
             composite_pipeline_state,
@@ -1201,7 +1215,7 @@ impl MetalRenderer {
             return;
         }
 
-        command_encoder.set_render_pipeline_state(&self.backdrops_pipeline_state);
+        command_encoder.set_render_pipeline_state(&self.backdrop_punch_pipeline_state);
         command_encoder.set_vertex_buffer(
             FilterInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1228,6 +1242,16 @@ impl MetalRenderer {
             &viewport_size as *const Size<DevicePixels> as *const _,
         );
         command_encoder.set_fragment_texture(FilterInputIndex::Source as u64, Some(source));
+        // The hole first, the blurred copy into it second: together they are
+        // `dst = mix(dst, blurred, k)`, which leaves a see-through window as clear as it was.
+        command_encoder.draw_primitives_instanced_base_instance(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            6,
+            backdrops.len() as u64,
+            backdrops.start as u64,
+        );
+        command_encoder.set_render_pipeline_state(&self.backdrops_pipeline_state);
         command_encoder.draw_primitives_instanced_base_instance(
             metal::MTLPrimitiveType::Triangle,
             0,
@@ -1864,6 +1888,20 @@ fn mask_params(layer: LayerEffect, destination_clip: Bounds<ScaledPixels>) -> Ma
     }
 }
 
+/// How a filter pipeline lands on what it covers.
+#[derive(Clone, Copy, PartialEq)]
+enum FilterBlend {
+    /// Replaces the destination outright.
+    Replace,
+    /// Premultiplied source-over.
+    Over,
+    /// Adds itself to the destination, for the second half of a backdrop's mix.
+    Add,
+    /// Keeps `1 - src.a` of the destination and contributes nothing of its own, for the first
+    /// half of a backdrop's mix.
+    Punch,
+}
+
 fn build_filter_pipeline_state(
     device: &metal::DeviceRef,
     library: &metal::LibraryRef,
@@ -1871,7 +1909,7 @@ fn build_filter_pipeline_state(
     vertex_fn_name: &str,
     fragment_fn_name: &str,
     pixel_format: metal::MTLPixelFormat,
-    blended: bool,
+    blend: FilterBlend,
 ) -> metal::RenderPipelineState {
     let vertex_fn = library
         .get_function(vertex_fn_name, None)
@@ -1886,16 +1924,25 @@ fn build_filter_pipeline_state(
     descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
     let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
     color_attachment.set_pixel_format(pixel_format);
-    color_attachment.set_blending_enabled(blended);
-    if blended {
+    color_attachment.set_blending_enabled(blend != FilterBlend::Replace);
+    if let Some((source, destination)) = match blend {
+        FilterBlend::Replace => None,
+        FilterBlend::Over => Some((
+            metal::MTLBlendFactor::One,
+            metal::MTLBlendFactor::OneMinusSourceAlpha,
+        )),
+        FilterBlend::Add => Some((metal::MTLBlendFactor::One, metal::MTLBlendFactor::One)),
+        FilterBlend::Punch => Some((
+            metal::MTLBlendFactor::Zero,
+            metal::MTLBlendFactor::OneMinusSourceAlpha,
+        )),
+    } {
         color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
         color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
-        color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
-        color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
-        color_attachment
-            .set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-        color_attachment
-            .set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+        color_attachment.set_source_rgb_blend_factor(source);
+        color_attachment.set_source_alpha_blend_factor(source);
+        color_attachment.set_destination_rgb_blend_factor(destination);
+        color_attachment.set_destination_alpha_blend_factor(destination);
     }
 
     device
