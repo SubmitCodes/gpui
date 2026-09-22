@@ -4098,7 +4098,8 @@ impl Window {
 
     /// Paint the drop (non-inset) shadows from `shadows` into the scene at the current
     /// z-index. Inset shadows are skipped; paint those with [`Self::paint_inset_shadows`]
-    /// after the element's background so they layer on top of the fill.
+    /// after the element's background so they layer on top of the fill. A drop shadow is
+    /// clipped to outside `bounds`, so a translucent fill never shows it through.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn paint_drop_shadows(
