@@ -104,9 +104,26 @@ impl LineLayout {
     /// The x position of the character at the given index
     pub fn x_for_index(&self, index: usize) -> Pixels {
         for run in &self.runs {
-            for glyph in &run.glyphs {
-                if glyph.index >= index {
-                    return glyph.position.x;
+            let is_rtl_run = run.glyphs.len() >= 2
+                && run.glyphs.first().unwrap().index > run.glyphs.last().unwrap().index;
+
+            if is_rtl_run {
+                if index >= self.len {
+                    return run.glyphs.first().map(|g| g.position.x).unwrap_or(px(0.));
+                }
+                if index == 0 {
+                    return self.width;
+                }
+                for glyph in &run.glyphs {
+                    if glyph.index <= index {
+                        return glyph.position.x;
+                    }
+                }
+            } else {
+                for glyph in &run.glyphs {
+                    if glyph.index >= index {
+                        return glyph.position.x;
+                    }
                 }
             }
         }
@@ -116,9 +133,20 @@ impl LineLayout {
     /// The corresponding Font at the given index
     pub fn font_id_for_index(&self, index: usize) -> Option<FontId> {
         for run in &self.runs {
-            for glyph in &run.glyphs {
-                if glyph.index >= index {
-                    return Some(run.font_id);
+            let is_rtl_run = run.glyphs.len() >= 2
+                && run.glyphs.first().unwrap().index > run.glyphs.last().unwrap().index;
+
+            if is_rtl_run {
+                for glyph in &run.glyphs {
+                    if glyph.index <= index {
+                        return Some(run.font_id);
+                    }
+                }
+            } else {
+                for glyph in &run.glyphs {
+                    if glyph.index >= index {
+                        return Some(run.font_id);
+                    }
                 }
             }
         }
