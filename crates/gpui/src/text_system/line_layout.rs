@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use super::LineWrapper;
+use super::{LineWrapper, is_rtl, prepare_bidi_line};
 
 /// A laid out and styled line of text
 #[derive(Default, Debug)]
@@ -667,9 +667,37 @@ impl LineLayoutCache {
             layout
         } else {
             let text = SharedString::from(text);
-            let mut layout = self
-                .platform_text_system
-                .layout_line(&text, font_size, runs);
+            let mut layout = if is_rtl(&text) {
+                let prepared = prepare_bidi_line(&text);
+                let bidi_runs = if runs.len() <= 1 {
+                    vec![FontRun {
+                        len: prepared.visual_text.len(),
+                        font_id: runs.first().map(|r| r.font_id).unwrap_or(FontId(0)),
+                    }]
+                } else {
+                    vec![FontRun {
+                        len: prepared.visual_text.len(),
+                        font_id: runs[0].font_id,
+                    }]
+                };
+                let mut layout = self.platform_text_system.layout_line(
+                    &prepared.visual_text,
+                    font_size,
+                    &bidi_runs,
+                );
+                for run in &mut layout.runs {
+                    for glyph in &mut run.glyphs {
+                        if let Some(&orig_idx) = prepared.visual_to_logical.get(glyph.index) {
+                            glyph.index = orig_idx;
+                        }
+                    }
+                }
+                layout.len = text.len();
+                layout
+            } else {
+                self.platform_text_system
+                    .layout_line(&text, font_size, runs)
+            };
 
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
